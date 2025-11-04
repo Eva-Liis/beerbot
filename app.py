@@ -9,25 +9,26 @@ ALGO_NAME = "EvaSellsBeer"
 VERSION = "v1.0.2"
 SUPPORTS = {"blackbox": True, "glassbox": False}
 HANDSHAKE_MESSAGE = "BeerBot ready"
+
 app = Flask(__name__)
 
-# --- Optimeeritud parameetrid (BACKLOG'I ENNETAJA) ---
+# --- Optimeeritud parameetrid (ÄÄRMUSLIK KONTROLL) ---
 ALPHA = 0.10           # Nõudluse silumine: Hoiame stabiilsena.
-K_SAFETY = 1.25        # Ohutusvaru kordaja: Kõige agressiivsem seade Backlog'i vältimiseks.
+K_SAFETY = 2.50        # Ohutusvaru kordaja: ÄÄRMUSLIKULT agressiivne seade Backlog'i vältimiseks.
 
 REVIEW_TIME = 1        # R: Iganädalane läbivaatus
 LEAD_TIME = 2          # L: Tarnetsükli viivitus (Standard)
 H_TARGET = REVIEW_TIME + LEAD_TIME # H: Kogu täitmisaeg (Target Period = 3 nädalat)
 
-# Dämpimise koefitsient (beta): Tagasi veidi kõrgemate väärtuste juurde, et kiiremini tellida ja Backlog'i likvideerida.
+# Dämpimise koefitsient (beta): ÄÄRMUSLIKULT madalad väärtused, et neutraliseerida Bullwhip'i, mille võiks tekitada kõrge K_SAFETY.
 BETA_BY_ROLE = {
-    "retailer": 0.20,      # (0.18 -> 0.20) Tõstame veidi.
-    "wholesaler": 0.15,    # (0.10 -> 0.15) Tõstame veidi.
-    "distributor": 0.10,   # (0.06 -> 0.10) Tõstame veidi.
-    "factory": 0.06,       # (0.03 -> 0.06) Tõstame veidi.
+    "retailer": 0.08,      # Väga madal.
+    "wholesaler": 0.05,    # Äärmiselt madal.
+    "distributor": 0.03,   # Peaaegu null.
+    "factory": 0.01,       # Peaaegu null.
 }
-# Piirame tellimuse muutust (RAMP): Lubame kiiremat taastumist.
-MAX_ORDER_CHANGE = 0.3 # Hoiame 0.3 peal.
+# Piirame tellimuse muutust (RAMP): Peab olema väga väike, et vältida K_SAFETY põhjustatud ületellimisi.
+MAX_ORDER_CHANGE = 0.1 # VÄGA VÄIKE PIIRANG.
 ROLES = ["retailer", "wholesaler", "distributor", "factory"]
 INITIAL_DEMAND_ESTIMATE = 10 # Eeldame esimesel nädalal algnõudlust 10
 
