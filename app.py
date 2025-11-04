@@ -12,23 +12,23 @@ HANDSHAKE_MESSAGE = "BeerBot ready"
 
 app = Flask(__name__)
 
-# --- Optimeeritud parameetrid (ÄÄRMUSLIK KONTROLL) ---
+# --- Optimeeritud parameetrid (TASAKAALUSTATUD KONTROLL) ---
 ALPHA = 0.10           # Nõudluse silumine: Hoiame stabiilsena.
-K_SAFETY = 2.50        # Ohutusvaru kordaja: ÄÄRMUSLIKULT agressiivne seade Backlog'i vältimiseks.
+K_SAFETY = 0.80        # Ohutusvaru kordaja: TASAKAALUSTATUD seade. Vähendab Inventuuri kulu, hoides Backlog'i minimaalsena.
 
 REVIEW_TIME = 1        # R: Iganädalane läbivaatus
 LEAD_TIME = 2          # L: Tarnetsükli viivitus (Standard)
 H_TARGET = REVIEW_TIME + LEAD_TIME # H: Kogu täitmisaeg (Target Period = 3 nädalat)
 
-# Dämpimise koefitsient (beta): ÄÄRMUSLIKULT madalad väärtused, et neutraliseerida Bullwhip'i, mille võiks tekitada kõrge K_SAFETY.
+# Dämpimise koefitsient (beta): ÄÄRMUSELT madalad väärtused Bullwhip'i eemaldamiseks.
 BETA_BY_ROLE = {
-    "retailer": 0.08,      # Väga madal.
-    "wholesaler": 0.05,    # Äärmiselt madal.
-    "distributor": 0.03,   # Peaaegu null.
+    "retailer": 0.06,      # Madal.
+    "wholesaler": 0.03,    # Väga madal.
+    "distributor": 0.02,   # Peaaegu null.
     "factory": 0.01,       # Peaaegu null.
 }
-# Piirame tellimuse muutust (RAMP): Peab olema väga väike, et vältida K_SAFETY põhjustatud ületellimisi.
-MAX_ORDER_CHANGE = 0.1 # VÄGA VÄIKE PIIRANG.
+# Piirame tellimuse muutust (RAMP): Peab olema väike, et vältida Bullwhip'i, kuid piisav Backlog'ist väljumiseks.
+MAX_ORDER_CHANGE = 0.15 # VÄIKE PIIRANG.
 ROLES = ["retailer", "wholesaler", "distributor", "factory"]
 INITIAL_DEMAND_ESTIMATE = 10 # Eeldame esimesel nädalal algnõudlust 10
 
