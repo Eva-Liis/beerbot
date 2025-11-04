@@ -27,7 +27,7 @@ from flask import Flask, request, jsonify
 
 
 STUDENT_EMAIL = "evtimm@taltech.ee"
-ALGO_NAME = "EvaFeaturing5.0"
+ALGO_NAME = "EvaSellsBeer"
 VERSION = "v1.0.0"
 SUPPORTS = {"blackbox": True, "glassbox": False}
 HANDSHAKE_MESSAGE = "BeerBot ready"
@@ -117,3 +117,4 @@ def decision():
         orders[k] = max(0, int(v))
 
     return jsonify({"orders": orders}), 200
+
