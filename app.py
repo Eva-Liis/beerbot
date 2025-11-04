@@ -55,14 +55,20 @@ def smooth_forecast_and_mad(weeks: List[Dict[str, Any]], role: str, alpha: float
             # Algne prognoos = esimene nõudlus
             fc = float(d)
         else:
-            prev_d = float(weeks[i-1]["roles"][role].get(demand_key, d)) # Eelmise perioodi D
+            # Eelmise perioodi nõudluse leidmine MAD arvutamiseks
+            if i > 0:
+                prev_w = weeks[i-1]
+                # Eeldame, et eelmine nõudlus on samal nädalal "incoming_orders" väärtus (mis peaks olema eelmise nädala tellimus)
+                prev_d = float(prev_w["roles"][role].get(demand_key, d)) 
+            else:
+                prev_d = fc # Kasuta esimesel iteratsioonil lihtsalt prognoosi väärtust
+            
             # Prognoos (Exponential Smoothing)
             fc = alpha * d + (1 - alpha) * fc
             # MAD (Mean Absolute Deviation, silutud)
             mad = alpha * abs(d - prev_d) + (1 - alpha) * mad
             
-    # Kasutame stabiilsuse tagamiseks MAD väärtuse asemel viimase MAE väärtust
-    # Kui MAD on väga väike, kasutame vaikimisi väärtust, mis arvestab väikseima stabiilse nõudlusega.
+    # Tagasta prognoos ja stabiilne MAD väärtus (garanteeri vähemalt 1.0)
     return (fc or 0.0), max(1.0, mad or fc / 5.0 or 1.0)
 
 
@@ -71,21 +77,25 @@ def calculate_pipeline(weeks: List[Dict[str, Any]], role: str) -> int:
     Arvutab laoseisus olevad tellimused (Pipeline Inventory) nende saadetiste alusel, 
     mis on tellitud, aga pole veel saabunud.
     
-    See on Beer Game'i kõige keerulisem osa: me ei tea otse, mis on "teel", 
-    seega rekonstrueerime selle viimastest tellimustest L-1 nädala jooksul.
+    Eeldab, et tarneviivitus on L nädalat. Teel on tellimused, mis anti L-1 nädalat tagasi.
     """
     if LEAD_TIME <= 1 or not weeks:
         return 0
     
-    # Võtame arvesse viimased (L - 1) nädalat, sest tellimus t-Lhat on just nüüd saabunud
-    # ja tellimus t on antud praegu. Me ei tea, mis hetkel tellimus t-1 saabub.
+    # Orders massiiv sisaldab kõigi nädalate tellimusi (sealhulgas praeguse nädala tellimust, 
+    # kui weeks[i]["orders"] sisaldab t-nädala tellimusi). Beer Game'is on tellimus Q(t) 
+    # tehtud nädalal t. See saabub nädalal t+L.
+    
+    # Kui me oleme nädalal N, on teel tellimused, mis anti nädalatel N-1, N-2, ... N-(L-1).
+    # Seega summeerime viimased (L-1) tegelikult antud tellimust (mis on massiivi lõpus).
+    
     orders = [int(w.get("orders", {}).get(role, 0)) for w in weeks]
     
-    # Tõhusam on eeldada, et O(t), O(t-1) ... O(t-L+1) on teel
-    # Võtame viimased (L-1) tellimust, alates eelmisest nädalast (-2) kuni (-L)
+    # Take L-1 orders starting from the end of the list (excluding the current week's order, 
+    # which is being calculated now, and the L-th week's order, which has just arrived).
     take = min(LEAD_TIME - 1, len(orders) - 1)
     
-    # Summeerime tellimused alates eelmisest nädalast kuni (L-1) nädalat tagasi.
+    # Summeerime tellimused: orders[-1] on eelmise nädala tellimus, orders[-2] üleeelmise jne.
     pipeline_sum = sum(orders[-(i + 1)] for i in range(take))
     
     return pipeline_sum
@@ -126,6 +136,8 @@ def decide_for_role(weeks: List[Dict[str, Any]], role: str) -> int:
     # Q* = BETA * GAP + (1 - BETA) * Previous_Order
     
     beta = BETA_BY_ROLE.get(role, 0.5)
+    
+    # Eelmise nädala tellimus (see on weeks[-1]["orders"])
     q_last = max(0, int(weeks[-1].get("orders", {}).get(role, 0)))
     
     q_base = beta * gap + (1 - beta) * q_last
@@ -178,4 +190,3 @@ def decision():
         print(f"Decision calculation failed: {e}")
         # Vaikimisi tellimus veaolukorras
         return jsonify({"orders": {r: 10 for r in ROLES}}), 200
-
