@@ -1,137 +1,157 @@
-# app.py (või api/app.py, kui kasutad Verceli Flask presetit)
 from __future__ import annotations
 from typing import Dict, Any, Tuple, List
 from flask import Flask, request, jsonify
 import math
+import numpy as np
 
 # --- Handshake meta (MUUDA OMAKS) ---
 STUDENT_EMAIL = "evtimm@taltech.ee"
 ALGO_NAME = "EvaSellsBeer"
-VERSION = "v1.0.1"
+VERSION = "v2.0.1"
 SUPPORTS = {"blackbox": True, "glassbox": False}
-HANDSHAKE_MESSAGE = "BeerBot ready"
+HANDSHAKE_MESSAGE = "Optimized BeerBot ready for smooth supply chain."
 
 app = Flask(__name__)
 
-# --- Parameetrid (deterministlikud) ---
-ALPHA = 0.3              # nõudluse silumine
-K_SAFETY = 0.6           # ohutusvaru kordaja (pisut kõrgem, et backlog ei paisuks)
-BETA_BY_ROLE = {         # ülesvoolu rahulikum dämpimine
-    "retailer": 0.60,
-    "wholesaler": 0.50,
-    "distributor": 0.40,
-    "factory": 0.35,
-}
-MAX_LAG = 8              # otsitav maks viiteaeg ristkorrelatsiooniga
-RAMP_FRAC = 0.30         # max muutus vs forecast ühe nädalaga (±30%)
-CAP_MULT = 1.8           # kõva lagi: tellimus ≤ CAP_MULT * (forecast*H + safety)
+# --- Optimeeritud parameetrid ---
+ALPHA = 0.25           # Nõudluse silumine (madalam, et reaktsioon oleks rahulikum)
+K_SAFETY = 0.8         # Ohutusvaru kordaja (natuke kõrgem, et absorbeerida prognoosiviga)
+REVIEW_TIME = 1        # R: Iganädalane läbivaatus
+LEAD_TIME = 2          # L: Tarnetsükli viivitus (Tavaline Beer Game'i standard)
+H_TARGET = REVIEW_TIME + LEAD_TIME # H: Kogu täitmisaeg (Target Period)
 
+# Dämpimise koefitsient (beta) rolli järgi. Madalamad väärtused ülesvoolu lülides (distributor, factory)
+# vähendavad Bullwhip'i efekti, siludes reaktsiooni IP puudujäägile.
+BETA_BY_ROLE = {
+    "retailer": 0.8,
+    "wholesaler": 0.6,
+    "distributor": 0.4,
+    "factory": 0.25, # Tehases on dämpimine kõige olulisem
+}
+MAX_ORDER_CHANGE = 0.3 # Maksimaalne lubatud muutus võrreldes eelmise tellimusega (±30%)
 ROLES = ["retailer", "wholesaler", "distributor", "factory"]
 
 
 def round_half_up(x: float) -> int:
-    return 0 if x <= 0 else int(math.floor(x + 0.5))
+    """Ümardab pool üles ja tagab, et tulemus pole negatiivne."""
+    return max(0, int(math.floor(x + 0.5)))
 
 
-def series_from_weeks(weeks: List[Dict[str, Any]], role: str) -> Tuple[List[int], List[int]]:
-    """Võta ajaread: meie tellimused ja meile saabunud saadetised per roll."""
-    orders = [int(w.get("orders", {}).get(role, 0)) for w in weeks]
-    arrivals = [int(w["roles"][role].get("arriving_shipments", 0)) for w in weeks]
-    return orders, arrivals
+def smooth_forecast_and_mad(weeks: List[Dict[str, Any]], role: str, alpha: float) -> Tuple[float, float]:
+    """
+    Eksponentsiaalne silumine ja eksponentsiaalselt silutud absoluutne hälve (MAD).
+    Kasutab incoming_orders seeriat (nõudlust).
+    """
+    fc = None
+    mad = 0.0
+    
+    # Eeldame, et nõudlus on eelmise lüli tellimus, jaemüüjal on see kliendi nõudlus.
+    demand_key = "customer_orders" if role == "retailer" else "incoming_orders"
 
-
-def estimate_lead_lag(weeks: List[Dict[str, Any]], role: str, max_lag: int = MAX_LAG) -> int:
-    """Hinda efektiivne viiteaeg L̂ ristkorrelatsiooniga (deterministlik, väikseima lag'i eelistus)."""
-    orders, arrivals = series_from_weeks(weeks, role)
-    n = len(weeks)
-    best_lag, best_score = 2, -1  # vaikimisi 2
-    for lag in range(1, min(max_lag, max(1, n - 1)) + 1):
-        # joonda: orders[t-lag] vs arrivals[t]
-        score = 0
-        for t in range(lag, n):
-            score += orders[t - lag] * arrivals[t]
-        if score > best_score:
-            best_score, best_lag = score, lag
-    return max(1, best_lag)
-
-
-def smooth_forecast_and_mae(weeks: List[Dict[str, Any]], role: str, alpha: float) -> Tuple[float, float]:
-    """Eksponentsiaalne silumine + MAE (deterministlik). Kasutab incoming_orders seeriat."""
-    fc, mae = None, 0.0
-    for w in weeks:
-        d = max(0, int(w["roles"][role].get("incoming_orders", 0)))
+    for i, w in enumerate(weeks):
+        d = max(0, int(w["roles"][role].get(demand_key, 0)))
+        
         if fc is None:
+            # Algne prognoos = esimene nõudlus
             fc = float(d)
         else:
-            prev = fc
+            prev_d = float(weeks[i-1]["roles"][role].get(demand_key, d)) # Eelmise perioodi D
+            # Prognoos (Exponential Smoothing)
             fc = alpha * d + (1 - alpha) * fc
-            mae = alpha * abs(d - prev) + (1 - alpha) * mae
-    return (fc or 0.0), mae
+            # MAD (Mean Absolute Deviation, silutud)
+            mad = alpha * abs(d - prev_d) + (1 - alpha) * mad
+            
+    # Kasutame stabiilsuse tagamiseks MAD väärtuse asemel viimase MAE väärtust
+    # Kui MAD on väga väike, kasutame vaikimisi väärtust, mis arvestab väikseima stabiilse nõudlusega.
+    return (fc or 0.0), max(1.0, mad or fc / 5.0 or 1.0)
 
 
-def projected_on_hand_and_backlog(state: Dict[str, int]) -> Tuple[int, int]:
-    inv = int(state.get("inventory", 0))
-    bkl = int(state.get("backlog", 0))
-    inc = int(state.get("incoming_orders", 0))
-    arr = int(state.get("arriving_shipments", 0))
-    on_hand = max(0, inv + arr - bkl - inc)
-    backlog = max(0, bkl + inc - (inv + arr))
-    return on_hand, backlog
-
-
-def last_order(weeks: List[Dict[str, Any]], role: str) -> int:
-    return max(0, int(weeks[-1].get("orders", {}).get(role, 0))) if weeks else 0
-
-
-def pipeline_on_order(weeks: List[Dict[str, Any]], role: str, Lhat: int) -> int:
-    """Lihtne rekonstruktsioon: sum viimased L̂-1 meie enda tellimused (need pole veel jõudnud)."""
-    if Lhat <= 1 or len(weeks) <= 1:
+def calculate_pipeline(weeks: List[Dict[str, Any]], role: str) -> int:
+    """
+    Arvutab laoseisus olevad tellimused (Pipeline Inventory) nende saadetiste alusel, 
+    mis on tellitud, aga pole veel saabunud.
+    
+    See on Beer Game'i kõige keerulisem osa: me ei tea otse, mis on "teel", 
+    seega rekonstrueerime selle viimastest tellimustest L-1 nädala jooksul.
+    """
+    if LEAD_TIME <= 1 or not weeks:
         return 0
+    
+    # Võtame arvesse viimased (L - 1) nädalat, sest tellimus t-Lhat on just nüüd saabunud
+    # ja tellimus t on antud praegu. Me ei tea, mis hetkel tellimus t-1 saabub.
     orders = [int(w.get("orders", {}).get(role, 0)) for w in weeks]
-    take = min(Lhat - 1, len(weeks) - 1)
-    return sum(orders[-i] for i in range(1, take + 1))
+    
+    # Tõhusam on eeldada, et O(t), O(t-1) ... O(t-L+1) on teel
+    # Võtame viimased (L-1) tellimust, alates eelmisest nädalast (-2) kuni (-L)
+    take = min(LEAD_TIME - 1, len(orders) - 1)
+    
+    # Summeerime tellimused alates eelmisest nädalast kuni (L-1) nädalat tagasi.
+    pipeline_sum = sum(orders[-(i + 1)] for i in range(take))
+    
+    return pipeline_sum
 
 
 def decide_for_role(weeks: List[Dict[str, Any]], role: str) -> int:
-    # 1) Hinda viiteaeg L̂ ja vali H = L̂ + 1 (review + lead)
-    Lhat = estimate_lead_lag(weeks, role, MAX_LAG)
-    H = Lhat + 1
+    """Põhiline Order-Up-To poliitika loogika."""
+    
+    current_state = weeks[-1]["roles"][role]
+    
+    # 1) H: Kogu täitmisaeg (fikseeritud)
+    H = H_TARGET 
 
-    # 2) Prognoos + viga
-    fc, mae = smooth_forecast_and_mae(weeks, role, ALPHA)
+    # 2) Prognoos (fc) ja Viga (mad)
+    fc, mad = smooth_forecast_and_mad(weeks, role, ALPHA)
 
-    # 3) IP = on_hand - backlog + pipeline (rekonstrueeritud)
-    on_hand, backlg = projected_on_hand_and_backlog(weeks[-1]["roles"][role])
-    on_order = pipeline_on_order(weeks, role, Lhat)
-    IP = on_hand - backlg + on_order
+    # 3) Ohutusvaru (Safety Stock)
+    # SS = K * MAD * sqrt(H)
+    safety_stock = K_SAFETY * mad * math.sqrt(H)
+    
+    # 4) Inventuuri positsioon (Inventory Position, IP)
+    # IP = Inventory + Pipeline - Backlog
+    
+    inventory = int(current_state.get("inventory", 0))
+    backlog = int(current_state.get("backlog", 0))
+    pipeline = calculate_pipeline(weeks, role)
+    
+    IP = inventory - backlog + pipeline
 
-    # 4) siht + ohutusvaru + osaline samm
-    safety = K_SAFETY * mae * math.sqrt(H)
-    target = fc * H + safety
-    gap = target - IP
+    # 5) Sihttase (Order-Up-To Level, S)
+    # S = H * FC + SS
+    target_S = fc * H + safety_stock
 
+    # 6) Puudujääk (GAP)
+    gap = target_S - IP
+    
+    # 7) Baas-tellimus Q* (silutud reaktsioon puudujäägile)
+    # Q* = BETA * GAP + (1 - BETA) * Previous_Order
+    
     beta = BETA_BY_ROLE.get(role, 0.5)
-    q_last = last_order(weeks, role)
-    q_star = beta * gap + (1 - beta) * q_last
+    q_last = max(0, int(weeks[-1].get("orders", {}).get(role, 0)))
+    
+    q_base = beta * gap + (1 - beta) * q_last
 
-    # 5) ramp + lagi + integer >= 0
-    # ramp: piirame muutuse võrreldes eelmise tellimusega ±RAMP_FRAC*fc
-    ramp = max(1, int(math.floor(RAMP_FRAC * max(fc, 1) + 0.5)))
-    q_min = max(0, q_last - ramp)
+    # 8) Piirangud (Ramp Constraint)
+    # Peamine parandus: piirame tellimuste muutuse maksimaalselt MAX_ORDER_CHANGE protsendiga.
+    
+    # Maksimaalne lubatud muutus (minimaalselt 1)
+    ramp = max(1, round_half_up(MAX_ORDER_CHANGE * max(fc, 1.0)))
+    
+    # Min ja Max tellimuse piirid eelmise tellimuse suhtes
+    q_min_ramp = max(0, q_last - ramp)
     q_max_ramp = q_last + ramp
+    
+    # Rakendame piirangud
+    q_final = min(q_max_ramp, max(q_min_ramp, round_half_up(q_base)))
 
-    # absoluutne lagi sihttaseme ümber
-    hard_cap = int(math.floor(CAP_MULT * (fc * H + safety) + 0.5))
-    q_capped = min(q_max_ramp, hard_cap, max(q_min, round_half_up(q_star)))
-
-    return max(0, int(q_capped))
+    return max(0, int(q_final))
 
 
 @app.post("/api/decision")
 def decision():
+    """Võtab vastu API päringu ja väljastab tellimused."""
     body: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
 
-    # Handshake
+    # Handshake - Protokolli kinnitus
     if body.get("handshake") is True:
         return jsonify({
             "ok": True,
@@ -142,11 +162,19 @@ def decision():
             "message": HANDSHAKE_MESSAGE,
         }), 200
 
-    # Weekly
+    # Weekly Decision - Iganädalane otsus
     weeks = body.get("weeks", [])
     if not isinstance(weeks, list) or not weeks:
+        # Vaikimisi tellimus, kui andmed puuduvad
         return jsonify({"orders": {r: 10 for r in ROLES}}), 200
 
-    orders = {r: decide_for_role(weeks, r) for r in ROLES}
-    orders = {k: max(0, int(v)) for k, v in orders.items()}  # ints only
-    return jsonify({"orders": orders}), 200
+    try:
+        orders = {r: decide_for_role(weeks, r) for r in ROLES}
+        # Garanteeri, et tellimus on täisarv ja >= 0
+        orders = {k: max(0, int(v)) for k, v in orders.items()}
+        return jsonify({"orders": orders}), 200
+    except Exception as e:
+        # Vigade käsitlemine
+        print(f"Decision calculation failed: {e}")
+        # Vaikimisi tellimus veaolukorras
+        return jsonify({"orders": {r: 10 for r in ROLES}}), 200
