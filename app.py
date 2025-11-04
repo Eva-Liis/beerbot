@@ -12,24 +12,24 @@ HANDSHAKE_MESSAGE = "BeerBot ready"
 
 app = Flask(__name__)
 
-# --- Optimeeritud parameetrid (MUUTUSED VÕIDUTÖÖ STABIILSUSE SAAVUTAMISEKS) ---
-ALPHA = 0.15           # Nõudluse silumine: (Jääb 0.15) Reageerib nõudlusele kiiresti.
-K_SAFETY = 0.6         # Ohutusvaru kordaja: (Jääb 0.6) Hoiab Inventory Cost kontrolli all.
+# --- Optimeeritud parameetrid (MUUDA STATISIMAKS JA LISAME BACKLOG RECOUPMENT) ---
+ALPHA = 0.10           # Nõudluse silumine: (0.15 -> 0.10) Aeglasem prognoos, parem stabiilsus.
+K_SAFETY = 0.5         # Ohutusvaru kordaja: (0.6 -> 0.5) Vähendab Inventory Cost.
+BACKLOG_RECOUPMENT_FACTOR = 1.0 / 3.0 # Likvideeri Backlog H perioodi jooksul (1/H). H=3.
+
 REVIEW_TIME = 1        # R: Iganädalane läbivaatus
 LEAD_TIME = 2          # L: Tarnetsükli viivitus (Standard)
 H_TARGET = REVIEW_TIME + LEAD_TIME # H: Kogu täitmisaeg (Target Period = 3 nädalat)
 
-# Dämpimise koefitsient (beta): Radikaalselt vähendatud, et Bullwhip täielikult eemaldada.
-# See muudab süsteemi väga inertseks ja stabiilseks.
+# Dämpimise koefitsient (beta): Hoiame madalal, et Bullwhip täielikult eemaldada.
 BETA_BY_ROLE = {
-    "retailer": 0.25, # 0.40 -> 0.25: Vähendame agressiivsust
-    "wholesaler": 0.15, # 0.25 -> 0.15
-    "distributor": 0.10, # 0.15 -> 0.10
-    "factory": 0.05,    # 0.20 -> 0.05: Tehas on peaaegu liikumatu, et Bullwhip'i likvideerida
+    "retailer": 0.25, 
+    "wholesaler": 0.15,
+    "distributor": 0.10,
+    "factory": 0.05,
 }
-# Suurendame tellimuse muutuse piiri (Ramp) veidi, et kiiremini backlogi likvideerida,
-# samas vältides siiski hüppeid.
-MAX_ORDER_CHANGE = 0.4 
+# Vähendame tellimuse muutuse piiri (Ramp) veidi, et Bullwhip'i veelgi vähendada.
+MAX_ORDER_CHANGE = 0.3 # 0.4 -> 0.3
 ROLES = ["retailer", "wholesaler", "distributor", "factory"]
 INITIAL_DEMAND_ESTIMATE = 10 # Eeldame esimesel nädalal algnõudlust 10
 
@@ -149,16 +149,20 @@ def decide_for_role(weeks: List[Dict[str, Any]], role: str) -> int:
     # 6) Puudujääk (GAP)
     gap = target_S - IP
     
-    # 7) Baas-tellimus Q* (silutud reaktsioon puudujäägile)
-    # Q* = BETA * GAP + (1 - BETA) * Previous_Order
+    # 7) Baas-tellimus Q* (silutud reaktsioon puudujäägile + Backlog recoupment)
+    # Q* = BETA * GAP + (1 - BETA) * Previous_Order + Backlog_Recoupment
     
     beta = BETA_BY_ROLE.get(role, 0.5)
     
     # Eelmise nädala tellimus (see on weeks[-1]["orders"])
     q_last = max(0, int(weeks[-1].get("orders", {}).get(role, 0)))
     
-    # Uus tellimus on tasakaalustatud: reaktsioon puudujäägile ja inerts eelmise tellimuse suhtes
-    q_base = beta * gap + (1 - beta) * q_last
+    # Backlog'i kompenseerimine: lisame Backlog'i osa (Recoupment) iga nädal
+    # See sunnib algoritmi tellima Backlog'i katmiseks juurde
+    backlog_recoupment = backlog * BACKLOG_RECOUPMENT_FACTOR
+    
+    # Uus tellimus on tasakaalustatud: reaktsioon puudujäägile, inerts ja Backlog'i katmine
+    q_base = beta * gap + (1 - beta) * q_last + backlog_recoupment
 
     # 8) Piirangud (Ramp Constraint)
     # Piirame tellimuste muutuse maksimaalselt MAX_ORDER_CHANGE protsendiga.
