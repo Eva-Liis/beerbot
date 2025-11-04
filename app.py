@@ -9,7 +9,7 @@ STUDENT_EMAIL = "evtimm@taltech.ee"
 ALGO_NAME = "EvaSellsBeer"
 VERSION = "v1.0.1"
 SUPPORTS = {"blackbox": True, "glassbox": False}
-HANDSHAKE_MESSAGE = BeerBot ready"
+HANDSHAKE_MESSAGE = "BeerBot ready"
 
 app = Flask(__name__)
 
@@ -190,3 +190,4 @@ def decision():
         print(f"Decision calculation failed: {e}")
         # Vaikimisi tellimus veaolukorras
         return jsonify({"orders": {r: 10 for r in ROLES}}), 200
+
