@@ -2,7 +2,6 @@ from __future__ import annotations
 from typing import Dict, Any, Tuple, List
 from flask import Flask, request, jsonify
 import math
-import numpy as np
 
 # --- Handshake meta (MUUDA OMAKS) ---
 STUDENT_EMAIL = "evtimm@taltech.ee"
@@ -190,4 +189,5 @@ def decision():
         print(f"Decision calculation failed: {e}")
         # Vaikimisi tellimus veaolukorras
         return jsonify({"orders": {r: 10 for r in ROLES}}), 200
+
 
