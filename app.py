@@ -3,208 +3,155 @@ from typing import Dict, Any, Tuple, List
 from flask import Flask, request, jsonify
 import math
 
-# --- Handshake meta  ---
+# --- Handshake meta ---
 STUDENT_EMAIL = "evtimm@taltech.ee"
 ALGO_NAME = "EvaSellsBeer"
-VERSION = "v1.0.1"
+VERSION = "v1.0.2"
 SUPPORTS = {"blackbox": True, "glassbox": False}
 HANDSHAKE_MESSAGE = "BeerBot ready"
 
 app = Flask(__name__)
 
-# --- Optimeeritud parameetrid (INVENTUURI KULU TAPJA) ---
-ALPHA = 0.10           # Nõudluse silumine: Hoiame stabiilsena.
-K_SAFETY = 1.20        # Ohutusvaru kordaja: Maksimaalne ennetav tellimine Backlog'i vältimiseks.
-
-REVIEW_TIME = 1        # R: Iganädalane läbivaatus
-LEAD_TIME = 2          # L: Tarnetsükli viivitus (Standard)
-H_TARGET = REVIEW_TIME + LEAD_TIME # H: Kogu täitmisaeg (Target Period = 3 nädalat)
-
-# Dämpimise koefitsient (beta): Langetame BULLWHIP'I efekti vähendamiseks, et hoida inventuuri kulu madalal.
-BETA_BY_ROLE = {
-    "retailer": 0.18,      # (0.20 -> 0.18) Kerge dämpimine.
-    "wholesaler": 0.10,    # (0.15 -> 0.10) Agressiivne dämpimine.
-    "distributor": 0.06,   # (0.10 -> 0.06) Agressiivne dämpimine.
-    "factory": 0.03,       # (0.06 -> 0.03) Range dämpimine Bullwhip'i lõpus.
+# --- Tuuled (deterministlikud) ---
+ALPHA = 0.35              # kiirem, kuid stabiilne silumine
+K_SAFETY = 0.8            # mõõdukas ohutusvaru (backlog << inventory eesmärk)
+BETA_BY_ROLE = {          # rollipõhine dämpimine (ülesvool aeglasem)
+    "retailer": 0.65,
+    "wholesaler": 0.55,
+    "distributor": 0.45,
+    "factory": 0.35,
 }
-# Piirame tellimuse muutust (RAMP): Lubame kiiremat taastumist.
-MAX_ORDER_CHANGE = 0.3 # Hoiame 0.3 peal.
+MAX_LAG = 6               # max hinnatav viiteaeg
+RAMP_FRAC = 0.25          # tellimuse muutus ±25% prognoosist nädalas
+CAP_MULT = 1.6            # kõva lagi sihttaseme ümber
+REVIEW_TIME = 1
+LEAD_TIME_DEFAULT = 2
+INITIAL_DEMAND_ESTIMATE = 12
 ROLES = ["retailer", "wholesaler", "distributor", "factory"]
-INITIAL_DEMAND_ESTIMATE = 10 # Eeldame esimesel nädalal algnõudlust 10
 
 
 def round_half_up(x: float) -> int:
-    """Ümardab pool üles ja tagab, et tulemus pole negatiivne."""
-    return max(0, int(math.floor(x + 0.5)))
-
-def smooth_forecast_and_mad(weeks: List[Dict[str, Any]], role: str, alpha: float) -> Tuple[float, float]:
-    """
-    Eksponentsiaalne silumine ja eksponentsiaalselt silutud absoluutne hälve (MAD).
-    Kasutab incoming_orders seeriat (nõudlust).
-    """
-    fc = None
-    mad = 0.0
-    
-    # Eeldame, et nõudlus on eelmise lüli tellimus, jaemüüjal on see kliendi nõudlus.
-    demand_key = "customer_orders" if role == "retailer" else "incoming_orders"
-    
-    # Esimestel nädalatel kasutame algset hinnangut, et vältida nulliga jagamist või ebastabiilsust
-    initial_demand = INITIAL_DEMAND_ESTIMATE
-
-    for i, w in enumerate(weeks):
-        # Võtame sissetuleva tellimuse (mis on tegelik nõudlus sellele lülile)
-        d = max(0, int(w["roles"][role].get(demand_key, 0)))
-        
-        if fc is None:
-            # Algne prognoos (FC)
-            # Eeldus: FC0 = esimene tegelik nõudlus, kui see on olemas, muidu algväärtus.
-            fc = float(d) if d > 0 else float(initial_demand)
-        else:
-            # Eelmise perioodi nõudluse leidmine MAD arvutamiseks
-            if i > 0:
-                # Kui i > 0, peaks weeks[i-1] sisaldama tegeliku nõudluse andmeid.
-                prev_w = weeks[i-1]
-                prev_d = float(prev_w["roles"][role].get(demand_key, initial_demand)) 
-            else:
-                # i=0 (esimene nädal), kasutame algväärtust
-                prev_d = float(initial_demand)
-            
-            # Prognoos (Exponential Smoothing)
-            fc = alpha * d + (1 - alpha) * fc
-            # MAD (Mean Absolute Deviation, silutud)
-            mad = alpha * abs(d - prev_d) + (1 - alpha) * mad
-            
-    # Tagasta prognoos ja stabiilne MAD väärtus (garanteeri vähemalt 1.0)
-    return (fc or float(initial_demand)), max(1.0, mad or fc / 5.0 or 1.0)
+    return 0 if x <= 0 else int(math.floor(x + 0.5))
 
 
-def calculate_pipeline(weeks: List[Dict[str, Any]], role: str) -> int:
-    """
-    Arvutab laoseisus olevad tellimused (Pipeline Inventory) nende saadetiste alusel, 
-    mis on tellitud, aga pole veel saabunud.
-    """
-    # Eeldus: L=2. Teel on tellimused, mis anti nädalal t-1.
-    if LEAD_TIME <= 1 or len(weeks) < LEAD_TIME:
-         # Kui andmeid pole piisavalt, on pipeline 0.
-        return 0
-    
-    # Vastavalt juhendile on tellimus Q(t) tehtud nädalal t ja see saabub nädalal t+L.
-    # Nädalal N on teel tellimused, mis anti N-1, N-2, ... N-(L-1) nädalatel.
-    
-    # Orders massiivi pikkus on N (alates nädalast 1 kuni N)
+def series_from_weeks(weeks: List[Dict[str, Any]], role: str):
     orders = [int(w.get("orders", {}).get(role, 0)) for w in weeks]
-    
-    # Teel olevate tellimuste arv on L-1
-    take = LEAD_TIME - 1
-    
-    # Summeerime tellimused, mis on teel (nt L=2, siis teel on 2-1=1 tellimus: weeks[-1])
-    # Tuleb veenduda, et orders massiivis on piisavalt elemente, et tagasi vaadata take võrra.
-    if len(orders) < take:
-        return 0
+    arrivals = [int(w["roles"][role].get("arriving_shipments", 0)) for w in weeks]
+    return orders, arrivals
 
-    # orders[-1] on eelmise nädala tellimus (Q(N-1)), orders[-2] on Q(N-2) jne.
-    # Alustame tagant ja summeerime 'take' arvu tellimusi.
-    pipeline_sum = sum(orders[-(i + 1)] for i in range(take))
-    
-    return pipeline_sum
+
+def estimate_lead_lag(weeks: List[Dict[str, Any]], role: str, max_lag: int = MAX_LAG) -> int:
+    """Ristkorrelatsioon: leia lag, kus orders[t-lag] 'sobib' arrivals[t]-ga kõige paremini."""
+    orders, arrivals = series_from_weeks(weeks, role)
+    n = len(weeks)
+    if n < 2:
+        return LEAD_TIME_DEFAULT
+    best_lag, best_score = 1, -1
+    for lag in range(1, min(max_lag, n - 1) + 1):
+        score = 0
+        for t in range(lag, n):
+            score += orders[t - lag] * arrivals[t]
+        if score > best_score:
+            best_score, best_lag = score, lag
+    return max(1, best_lag)
+
+
+def smooth_forecast_and_mae(weeks: List[Dict[str, Any]], role: str, alpha: float) -> Tuple[float, float]:
+    """Eksponentsiaalne silumine prognoosiks ja MAE prognoosiveaks (|d - fc_prev|)."""
+    fc, mae = None, 0.0
+    for w in weeks:
+        d = max(0, int(w["roles"][role].get("incoming_orders", 0)))  # NB: alati incoming_orders
+        if fc is None:
+            fc = float(d if d > 0 else INITIAL_DEMAND_ESTIMATE)
+        else:
+            mae = alpha * abs(d - fc) + (1 - alpha) * mae
+            fc = alpha * d + (1 - alpha) * fc
+    return (fc or float(INITIAL_DEMAND_ESTIMATE)), max(1.0, mae)
+
+
+def last_order(weeks: List[Dict[str, Any]], role: str) -> int:
+    return max(0, int(weeks[-1].get("orders", {}).get(role, 0))) if weeks else 0
+
+
+def pipeline_on_order(weeks: List[Dict[str, Any]], role: str, Lhat: int) -> int:
+    """Teel olev kaup: sum viimased L̂-1 meie enda tellimused (need pole veel kohal)."""
+    if Lhat <= 1 or len(weeks) <= 1:
+        return 0
+    orders = [int(w.get("orders", {}).get(role, 0)) for w in weeks]
+    take = min(Lhat - 1, len(weeks) - 1)
+    return sum(orders[-i] for i in range(1, take + 1))
 
 
 def decide_for_role(weeks: List[Dict[str, Any]], role: str) -> int:
-    """Põhiline Order-Up-To poliitika loogika (S-s poliitika)."""
-    
-    # Nädala 1 erikäsitlus: kui weeks on pikkusega 1 ja see on simulatsiooni algus
-    if len(weeks) == 1 and weeks[0].get("week") == 1:
-        # Hoidke esimene tellimus madalal, et vältida esialgset Bullwhip'i
-        return INITIAL_DEMAND_ESTIMATE
+    # 1) Hinda lead-time L̂, sea H = min(REVIEW + L̂, 6)
+    Lhat = estimate_lead_lag(weeks, role, MAX_LAG) if len(weeks) >= 3 else LEAD_TIME_DEFAULT
+    H = min(REVIEW_TIME + Lhat, 6)
 
-    current_state = weeks[-1]["roles"][role]
-    
-    # 1) H: Kogu täitmisaeg (fikseeritud)
-    H = H_TARGET 
+    # 2) Prognoos + prognoosiviga
+    fc, mae = smooth_forecast_and_mae(weeks, role, ALPHA)
 
-    # 2) Prognoos (fc) ja Viga (mad)
-    fc, mad = smooth_forecast_and_mad(weeks, role, ALPHA)
+    # 3) IP = (inventory + arriving_shipments) - backlog + pipeline
+    state = weeks[-1]["roles"][role]
+    inv = int(state.get("inventory", 0))
+    arr = int(state.get("arriving_shipments", 0))
+    bkl = int(state.get("backlog", 0))
+    on_order = pipeline_on_order(weeks, role, Lhat)
+    IP = (inv + arr) - bkl + on_order
 
-    # 3) Ohutusvaru (Safety Stock)
-    # SS = K * MAD * sqrt(H)
-    safety_stock = K_SAFETY * mad * math.sqrt(H)
-    
-    # 4) Inventuuri positsioon (Inventory Position, IP)
-    # IP = Inventory + Pipeline - Backlog
-    
-    inventory = int(current_state.get("inventory", 0))
-    backlog = int(current_state.get("backlog", 0))
-    # 'arriving_shipments' on juba Inventori poolt arvesse võetud (selle nädala saabumine)
-    # See väärtus on juba 'inventory' sees, seega ei lisa seda IP-le, vaid arvestame 
-    # ainult teel olevaid tellimusi, mis POLE veel saabunud (st Q(t-1), Q(t-2)).
-    pipeline = calculate_pipeline(weeks, role)
-    
-    IP = inventory - backlog + pipeline
+    # 4) Siht (order-up-to) + ohutusvaru
+    safety = K_SAFETY * mae * math.sqrt(H)
+    target = fc * H + safety
+    gap = target - IP
 
-    # 5) Sihttase (Order-Up-To Level, S)
-    # S = H * FC + SS
-    target_S = fc * H + safety_stock
-
-    # 6) Puudujääk (GAP)
-    gap = target_S - IP
-    
-    # 7) Baas-tellimus Q* (silutud reaktsioon puudujäägile)
-    # Q* = BETA * GAP + (1 - BETA) * Previous_Order
-    
+    # 5) Osaline samm + ramp + kõva lagi
     beta = BETA_BY_ROLE.get(role, 0.5)
-    
-    # Eelmise nädala tellimus (see on weeks[-1]["orders"])
-    q_last = max(0, int(weeks[-1].get("orders", {}).get(role, 0)))
-    
-    # Uus tellimus on tasakaalustatud: reaktsioon puudujäägile ja inerts eelmise tellimuse suhtes
-    q_base = beta * gap + (1 - beta) * q_last
+    q_last = last_order(weeks, role)
+    q_star = beta * gap + (1 - beta) * q_last
 
-    # 8) Piirangud (Ramp Constraint)
-    # Piirame tellimuste muutuse maksimaalselt MAX_ORDER_CHANGE protsendiga.
-    
-    # Maksimaalne lubatud muutus (minimaalselt 1)
-    ramp = max(1, round_half_up(MAX_ORDER_CHANGE * max(fc, 1.0)))
-    
-    # Min ja Max tellimuse piirid eelmise tellimuse suhtes
-    q_min_ramp = max(0, q_last - ramp)
-    q_max_ramp = q_last + ramp
-    
-    # Rakendame piirangud
-    q_final = min(q_max_ramp, max(q_min_ramp, round_half_up(q_base)))
-    
-    # Lõplik tellimus ei saa olla väiksem kui 0.
-    return max(0, int(q_final))
+    ramp = max(1, int(math.floor(RAMP_FRAC * max(fc, 1.0) + 0.5)))
+    q_min = max(0, q_last - ramp)
+    q_max = q_last + ramp
+    hard_cap = int(math.floor(CAP_MULT * (fc * H + safety) + 0.5))
+
+    q = max(q_min, min(q_max, round_half_up(q_star)))
+    q = min(q, hard_cap)
+
+    # 6) Kui backlog = 0 ja oleme sihist üle → ära kuhja ladu
+    if bkl == 0 and (inv + arr) > target:
+        q = min(q, round_half_up(fc))
+
+    return max(0, int(q))
 
 
 @app.post("/api/decision")
 def decision():
-    """Võtab vastu API päringu ja väljastab tellimused."""
-    body: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
-
-    # Handshake - Protokolli kinnitus
-    if body.get("handshake") is True:
-        return jsonify({
-            "ok": True,
-            "student_email": STUDENT_EMAIL,
-            "algorithm_name": ALGO_NAME,
-            "version": VERSION,
-            "supports": SUPPORTS,
-            "message": HANDSHAKE_MESSAGE,
-        }), 200
-
-    # Weekly Decision - Iganädalane otsus
-    weeks = body.get("weeks", [])
-    if not isinstance(weeks, list) or not weeks:
-        # Vaikimisi tellimus, kui andmed puuduvad
-        return jsonify({"orders": {r: INITIAL_DEMAND_ESTIMATE for r in ROLES}}), 200
-
     try:
+        body: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
+
+        # Handshake
+        if body.get("handshake") is True:
+            return jsonify({
+                "ok": True,
+                "student_email": STUDENT_EMAIL,
+                "algorithm_name": ALGO_NAME,
+                "version": VERSION,
+                "supports": SUPPORTS,
+                "message": HANDSHAKE_MESSAGE,
+            }), 200
+
+        # Weekly
+        weeks = body.get("weeks", [])
+        if not isinstance(weeks, list) or not weeks:
+            return jsonify({"orders": {r: INITIAL_DEMAND_ESTIMATE for r in ROLES}}), 200
+
         orders = {r: decide_for_role(weeks, r) for r in ROLES}
-        # Garanteeri, et tellimus on täisarv ja >= 0
         orders = {k: max(0, int(v)) for k, v in orders.items()}
         return jsonify({"orders": orders}), 200
+
     except Exception as e:
-        # Vigade käsitlemine
-        print(f"Decision calculation failed: {e}")
-        # Vaikimisi tellimus veaolukorras
-        return jsonify({"orders": {r: INITIAL_DEMAND_ESTIMATE for r in ROLES}}), 200
+        print("ERROR /api/decision:", repr(e))
+        # spec-sõbralik fallback, mitte 500
+        return jsonify({
+            "orders": {r: INITIAL_DEMAND_ESTIMATE for r in ROLES},
+            "error": "internal"
+        }), 200
