@@ -13,20 +13,19 @@ HANDSHAKE_MESSAGE = "BeerBot ready"
 app = Flask(__name__)
 
 # --- Optimeeritud parameetrid (MUUTUSED VÕIDUTÖÖ STABIILSUSE SAAVUTAMISEKS) ---
-ALPHA = 0.15           # Nõudluse silumine: Vähendatud (0.25 -> 0.15), et prognoos reageeriks aeglasemalt
-K_SAFETY = 0.5         # Ohutusvaru kordaja: Vähendatud (0.8 -> 0.5), et vältida ületellimist
+ALPHA = 0.1            # Nõudluse silumine: (0.15 -> 0.1) Väga konservatiivne prognoos.
+K_SAFETY = 0.8         # Ohutusvaru kordaja: (0.5 -> 0.8) Tõstetud, et minimeerida kulukat Backlog'i.
 REVIEW_TIME = 1        # R: Iganädalane läbivaatus
 LEAD_TIME = 2          # L: Tarnetsükli viivitus (Standard)
 H_TARGET = REVIEW_TIME + LEAD_TIME # H: Kogu täitmisaeg (Target Period = 3 nädalat)
 
-# Dämpimise koefitsient (beta) on tugevalt vähendatud (v2.0.2-s 0.8...0.25).
-# Väiksemad Beta väärtused muudavad süsteemi palju konservatiivsemaks ja aitavad 
-# vältida Bullwhip'i, suunates tellimuse aeglasemalt Target S väärtusele.
+# Dämpimise koefitsient (beta): Vähendatud veelgi, et Bullwhip täielikult eemaldada.
+# Beta kontrollib, kui suure osa IP-puudujäägist me üritame korrigeerida ühe nädalaga.
 BETA_BY_ROLE = {
-    "retailer": 0.35, # Aeglasem reaktsioon jaemüüja tasemel
-    "wholesaler": 0.25,
-    "distributor": 0.15,
-    "factory": 0.1,    # Tehases on dämpimine kõige olulisem ja peab olema madal
+    "retailer": 0.20, # 0.35 -> 0.20: Aeglasem reaktsioon jaemüüja tasemel
+    "wholesaler": 0.15, # 0.25 -> 0.15
+    "distributor": 0.10, # 0.15 -> 0.10
+    "factory": 0.05,    # 0.1 -> 0.05: Tehases peaaegu null inerts, minimeerides Bullwhip'i efekti
 }
 # Suurendame tellimuse muutuse piiri (Ramp) veidi, et kiiremini backlogi likvideerida,
 # samas vältides siiski hüppeid.
@@ -51,7 +50,6 @@ def smooth_forecast_and_mad(weeks: List[Dict[str, Any]], role: str, alpha: float
     demand_key = "customer_orders" if role == "retailer" else "incoming_orders"
     
     # Esimestel nädalatel kasutame algset hinnangut, et vältida nulliga jagamist või ebastabiilsust
-    # Algnõudluse arvutamiseks: vaatame ainult viimast nädalat (weeks[-1] on tegelik $d$ väärtus)
     initial_demand = INITIAL_DEMAND_ESTIMATE
 
     for i, w in enumerate(weeks):
