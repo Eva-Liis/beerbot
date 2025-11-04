@@ -13,19 +13,19 @@ HANDSHAKE_MESSAGE = "BeerBot ready"
 app = Flask(__name__)
 
 # --- Optimeeritud parameetrid (MUUTUSED VÕIDUTÖÖ STABIILSUSE SAAVUTAMISEKS) ---
-ALPHA = 0.15           # Nõudluse silumine: (0.1 -> 0.15) Reageerib nõudlusele kiiremini.
-K_SAFETY = 0.6         # Ohutusvaru kordaja: (0.8 -> 0.6) Tagasi madalama väärtuse juurde, et vähendada Inventory Cost.
+ALPHA = 0.15           # Nõudluse silumine: (Jääb 0.15) Reageerib nõudlusele kiiresti.
+K_SAFETY = 0.6         # Ohutusvaru kordaja: (Jääb 0.6) Hoiab Inventory Cost kontrolli all.
 REVIEW_TIME = 1        # R: Iganädalane läbivaatus
 LEAD_TIME = 2          # L: Tarnetsükli viivitus (Standard)
 H_TARGET = REVIEW_TIME + LEAD_TIME # H: Kogu täitmisaeg (Target Period = 3 nädalat)
 
-# Dämpimise koefitsient (beta): Jaemüüja agressiivsem, tehas kiirendab veidi.
-# See peaks aitama kiiremini Backlog'i likvideerida, samas vältides suuri kõikumisi.
+# Dämpimise koefitsient (beta): Radikaalselt vähendatud, et Bullwhip täielikult eemaldada.
+# See muudab süsteemi väga inertseks ja stabiilseks.
 BETA_BY_ROLE = {
-    "retailer": 0.40, # 0.20 -> 0.40: Agressiivsem, et kiiremini backlogi likvideerida
-    "wholesaler": 0.25, # 0.15 -> 0.25
-    "distributor": 0.15, # 0.10 -> 0.15
-    "factory": 0.20,    # 0.05 -> 0.20: Tehas peab kiiremini reageerima suurele puudujäägile
+    "retailer": 0.25, # 0.40 -> 0.25: Vähendame agressiivsust
+    "wholesaler": 0.15, # 0.25 -> 0.15
+    "distributor": 0.10, # 0.15 -> 0.10
+    "factory": 0.05,    # 0.20 -> 0.05: Tehas on peaaegu liikumatu, et Bullwhip'i likvideerida
 }
 # Suurendame tellimuse muutuse piiri (Ramp) veidi, et kiiremini backlogi likvideerida,
 # samas vältides siiski hüppeid.
