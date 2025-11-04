@@ -12,7 +12,7 @@ HANDSHAKE_MESSAGE = "BeerBot ready"
 
 app = Flask(__name__)
 
-# --- Optimeeritud parameetrid (BACKLOG'I HÄVITAJA) ---
+# --- Optimeeritud parameetrid (INVENTUURI KULU TAPJA) ---
 ALPHA = 0.10           # Nõudluse silumine: Hoiame stabiilsena.
 K_SAFETY = 1.20        # Ohutusvaru kordaja: Maksimaalne ennetav tellimine Backlog'i vältimiseks.
 
@@ -20,13 +20,12 @@ REVIEW_TIME = 1        # R: Iganädalane läbivaatus
 LEAD_TIME = 2          # L: Tarnetsükli viivitus (Standard)
 H_TARGET = REVIEW_TIME + LEAD_TIME # H: Kogu täitmisaeg (Target Period = 3 nädalat)
 
-# Dämpimise koefitsient (beta): Suurendame tagumiste lülide reaktsioonikiirust (beta), 
-# et puudujääki (GAP) kiiremini kompenseerida.
+# Dämpimise koefitsient (beta): Langetame BULLWHIP'I efekti vähendamiseks, et hoida inventuuri kulu madalal.
 BETA_BY_ROLE = {
-    "retailer": 0.15,      # Jäta jaemüüja suhteliselt stabiilseks (kontrollib Bullwhip'i algust).
-    "wholesaler": 0.12,    # (0.08 -> 0.12) Kiirendame hulgimüüjat.
-    "distributor": 0.10,   # (0.05 -> 0.10) Kiirendame turustajat.
-    "factory": 0.07,       # (0.03 -> 0.07) Kiirendame tehast.
+    "retailer": 0.18,      # (0.20 -> 0.18) Kerge dämpimine.
+    "wholesaler": 0.10,    # (0.15 -> 0.10) Agressiivne dämpimine.
+    "distributor": 0.06,   # (0.10 -> 0.06) Agressiivne dämpimine.
+    "factory": 0.03,       # (0.06 -> 0.03) Range dämpimine Bullwhip'i lõpus.
 }
 # Piirame tellimuse muutust (RAMP): Lubame kiiremat taastumist.
 MAX_ORDER_CHANGE = 0.3 # Hoiame 0.3 peal.
