@@ -10,27 +10,25 @@ VERSION = "v1.0.1"
 SUPPORTS = {"blackbox": True, "glassbox": False}
 HANDSHAKE_MESSAGE = "BeerBot ready"
 
-
 app = Flask(__name__)
 
-# --- Optimeeritud parameetrid (PARIMAD VÄÄRTUSED V6.0.0 BAASIL + SS KORREKTSIOON) ---
-ALPHA = 0.15           # Nõudluse silumine: Tagasi 0.15-le, et olla piisavalt reageeriv.
-K_SAFETY = 0.75        # Ohutusvaru kordaja: (0.6 -> 0.75) Suurendame ohutusvaru, et vältida Backlog'i tekkimist.
-# BACKLOG_RECOUPMENT_FACTOR = 1.0 / 3.0 # EEMALDATUD: See tekitas liiga suure Bullwhip'i ja inventuuri kulu.
+# --- Optimeeritud parameetrid (AGRESSIIVSELT STABILISEERITUD) ---
+ALPHA = 0.10           # Nõudluse silumine: (0.15 -> 0.10) Aeglasem prognoos, stabiilsus.
+K_SAFETY = 0.90        # Ohutusvaru kordaja: (0.75 -> 0.90) Suurendame SS-i. See on meie karistus Backlog'ile.
 
 REVIEW_TIME = 1        # R: Iganädalane läbivaatus
 LEAD_TIME = 2          # L: Tarnetsükli viivitus (Standard)
 H_TARGET = REVIEW_TIME + LEAD_TIME # H: Kogu täitmisaeg (Target Period = 3 nädalat)
 
-# Dämpimise koefitsient (beta): Hoiame madalal, et Bullwhip täielikult eemaldada. (V6.0.0 parameetrid)
+# Dämpimise koefitsient (beta): Vähendame oluliselt Bullwhip'i eemaldamiseks.
 BETA_BY_ROLE = {
-    "retailer": 0.25, 
-    "wholesaler": 0.15,
-    "distributor": 0.10,
-    "factory": 0.05,
+    "retailer": 0.15,      # (0.25 -> 0.15) Radikaalselt stabiilsem
+    "wholesaler": 0.08,    # (0.15 -> 0.08) 
+    "distributor": 0.05,   # (0.10 -> 0.05)
+    "factory": 0.03,       # (0.05 -> 0.03) Äärmiselt stabiilne
 }
-# Vähendame tellimuse muutuse piiri (Ramp) veidi, et Bullwhip'i veelgi vähendada. (V6.0.0 parameetrid)
-MAX_ORDER_CHANGE = 0.4 # Tagasi 0.4-le, sest 0.3 tegi süsteemi liiga aeglaseks.
+# Piirame tellimuse muutust (RAMP) oluliselt, et vältida hüppeid.
+MAX_ORDER_CHANGE = 0.2 # (0.4 -> 0.2) Tugev piirang!
 ROLES = ["retailer", "wholesaler", "distributor", "factory"]
 INITIAL_DEMAND_ESTIMATE = 10 # Eeldame esimesel nädalal algnõudlust 10
 
@@ -159,7 +157,6 @@ def decide_for_role(weeks: List[Dict[str, Any]], role: str) -> int:
     q_last = max(0, int(weeks[-1].get("orders", {}).get(role, 0)))
     
     # Uus tellimus on tasakaalustatud: reaktsioon puudujäägile ja inerts eelmise tellimuse suhtes
-    # Eemaldasime backlog_recoupment'i
     q_base = beta * gap + (1 - beta) * q_last
 
     # 8) Piirangud (Ramp Constraint)
