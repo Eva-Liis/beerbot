@@ -73,7 +73,7 @@ def decision():
             "student_email": "evtimm@taltech.ee",  # MUUDA!
             "algorithm_name": "EvaSellsBeerMuch",
             "version": "v27.0.0",
-            "supports": {"blackbox": True, "glassbox": True},
+            "supports": {"blackbox": True, "glassbox": False},
             "message": "BeerBot ready",
         })
 
@@ -119,3 +119,4 @@ def decision():
 
 if __name__ == "__main__":
     app.run(debug=False)
+
