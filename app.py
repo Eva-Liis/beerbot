@@ -4,37 +4,59 @@ import math
 app = Flask(__name__)
 
 # === KONSTANDID ===
-K_SAFETY = 0.75
-BETA_RETAILER = 0.35
-BETA_OTHER = 0.10
-MAX_ORDER_CHANGE = 0.30
-ALPHA = 0.10
+LEAD_TIME = 2
+K_SAFETY = 1.0
+BETA_RETAILER = 0.4
+BETA_OTHER = 0.15
+MAX_ORDER_CHANGE = 0.25
+ALPHA = 0.15
 SEED = 2025
 
-# Deterministliku käitumise tagamiseks (ei kasuta random, aga võid hiljem lisada)
+# Deterministlik
 import random
 random.seed(SEED)
 
 # === ABI FUNKTSIOONID ===
-def smooth_demand(prev_forecast, actual, alpha=ALPHA):
-    return round(alpha * actual + (1 - alpha) * prev_forecast)
+def smooth_demand(prev_forecast, actual):
+    return round(ALPHA * actual + (1 - ALPHA) * prev_forecast)
 
-def calculate_order(role_data, prev_order, prev_forecast, beta, is_retailer=False):
+def calculate_pipeline(weeks, role, week_num):
+    if week_num < 3:
+        return 0 if week_num == 1 else weeks[0]["orders"][role]
+    owed = 0
+    for k in range(2, week_num):  # 0-based index, k from 2 to week_num-1
+        order_2weeks_ago = weeks[k-2]["orders"][role]
+        arriving = weeks[k]["roles"][role]["arriving_shipments"]
+        delta = arriving - order_2weeks_ago
+        if delta > 0:
+            owed -= delta
+        else:
+            owed -= delta  # -= negative = +
+        owed = max(0, owed)
+    # Pipeline = owed + order_last_week
+    return owed + weeks[-2]["orders"][role]
+
+def calculate_order(role_data, prev_order, prev_forecast, beta, pipeline, week_num, weeks, role):
     incoming = role_data["incoming_orders"]
     backlog = role_data["backlog"]
     inventory = role_data["inventory"]
     arriving = role_data["arriving_shipments"]
 
-    # Efektiivne nõudlus = sissetulev tellimus + backlog
-    effective_demand = incoming + backlog
+    # Simuleeri uuendus
+    effective_inventory = inventory + arriving
+    shipped = min(effective_inventory, incoming + backlog)
+    new_inventory = effective_inventory - shipped
+    new_backlog = incoming + backlog - shipped
 
-    # Soovitud laoseis = prognoos + ohutusvaru
-    desired_inventory = prev_forecast * (1 + K_SAFETY)
+    # Desired = forecast * (lead_time + safety)
+    desired = prev_forecast * (LEAD_TIME + K_SAFETY)
 
-    # Tellimus = prognoos + korrektsioon (laoseis + backlog)
-    base_order = prev_forecast + beta * (effective_demand - arriving - inventory + desired_inventory - inventory)
+    # Korrektsioon
+    adjustment = beta * (desired + new_backlog - new_inventory - pipeline)
 
-    # Piirame muutust võrreldes eelmise tellimusega
+    base_order = prev_forecast + adjustment
+
+    # Piira muutust
     max_change = prev_order * MAX_ORDER_CHANGE
     order = max(prev_order - max_change, min(prev_order + max_change, base_order))
 
@@ -48,10 +70,10 @@ def decision():
     if data.get("handshake") is True:
         return jsonify({
             "ok": True,
-            "student_email": "evtimm@taltech.ee",  # ← MUUDA SIIN!
-            "algorithm_name": "MeSellingBeerMuch",
-            "version": "v26.0.0",
-            "supports": {"blackbox": True, "glassbox": False},
+            "student_email": "evtimm@taltech.ee",  # MUUDA!
+            "algorithm_name": "EvaSellsBeerMuch",
+            "version": "v27.0.0",
+            "supports": {"blackbox": True, "glassbox": True},
             "message": "BeerBot ready",
         })
 
@@ -65,41 +87,32 @@ def decision():
     mode = data.get("mode", "blackbox")
 
     roles = current_week["roles"]
-    prev_orders = current_week["orders"]
+    prev_orders = current_week["orders"] if week_num == 1 else weeks[-2]["orders"]
 
-    # Algväärtused esimesel nädalal
+    # Forecast'i taastamine
+    forecast = {}
     if week_num == 1:
-        forecast = {role: roles[role]["incoming_orders"] for role in roles}
-        prev_order_dict = {role: 10 for role in roles}  # default
-    else:
-        # Taasta eelmine prognoos ja tellimus
-        prev_week = weeks[-2]
-        prev_orders = prev_week["orders"]
-        # Lihtne: kasuta eelmise nädala sissetulevat tellimust kui prognoosi alus
-        forecast = {}
         for role in roles:
-            actual_demand = roles[role]["incoming_orders"]
-            prev_forecast = prev_orders[role] if week_num == 2 else forecast.get(role, actual_demand)
-            forecast[role] = smooth_demand(prev_forecast, actual_demand, ALPHA)
-        prev_order_dict = prev_orders
+            forecast[role] = roles[role]["incoming_orders"]
+    else:
+        for role in roles:
+            actual = roles[role]["incoming_orders"]
+            prev_f = forecast.get(role, actual) if 'forecast' in locals() else actual  # Inits
+            forecast[role] = smooth_demand(prev_f, actual)
 
-    # Arvuta uued tellimused
+    # Arvuta tellimused
     orders = {}
     for role in ["retailer", "wholesaler", "distributor", "factory"]:
         role_data = roles[role]
-        prev_order = prev_order_dict.get(role, 10)
-        prev_forecast = forecast.get(role, role_data["incoming_orders"])
+        prev_order = prev_orders[role] if week_num > 1 else 10
+        prev_forecast = forecast[role]
 
         beta = BETA_RETAILER if role == "retailer" else BETA_OTHER
-        is_retailer = (role == "retailer")
 
-        # Blackbox režiim: kasuta ainult oma rolli andmeid
-        if mode == "blackbox" and role != "retailer":
-            # Simuleeri, et teised rollid näevad ainult oma andmeid
-            # (kuid meil on siiski kõik andmed, seega kasutame siiski oma rolli)
-            pass
+        # Pipeline ainult oma rolli ajalooga (blackbox)
+        pipeline = calculate_pipeline(weeks, role, week_num)
 
-        order = calculate_order(role_data, prev_order, prev_forecast, beta, is_retailer)
+        order = calculate_order(role_data, prev_order, prev_forecast, beta, pipeline, week_num, weeks, role)
         orders[role] = order
 
     return jsonify({"orders": orders})
