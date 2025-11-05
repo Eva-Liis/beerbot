@@ -12,7 +12,7 @@ HANDSHAKE_MESSAGE = "BeerBot ready"
 
 app = Flask(__name__)
 
-# --- Optimeeritud parameetrid (TASAKAALUSTATUD DÄMPING) ---
+# --- Optimeeritud parameetrid (ÄÄRMUSLIK STABIILSUS JA MADAL RAMP) ---
 ALPHA = 0.10           # Nõudluse silumine: Hoiame stabiilsena.
 K_SAFETY = 1.00        # Ohutusvaru kordaja: Optimaalne seade (keskmine) - vähendab inventuuri kulu.
 
@@ -21,14 +21,17 @@ LEAD_TIME = 2          # L: Tarnetsükli viivitus (Standard)
 H_TARGET = REVIEW_TIME + LEAD_TIME # H: Kogu täitmisaeg (Target Period = 3 nädalat)
 
 # Dämpimise koefitsient (beta): ÄÄRMUSELT madalad väärtused Bullwhip'i eemaldamiseks.
+# Kasutame kõigile rollidele sama äärmiselt madalat BETA väärtust.
+BETA_ALL = 0.01
+
 BETA_BY_ROLE = {
-    "retailer": 0.08,      # Väga madal.
-    "wholesaler": 0.06,    # Väga madal.
-    "distributor": 0.04,   # Äärmiselt madal.
-    "factory": 0.02,       # Peaaegu null.
+    "retailer": BETA_ALL,      
+    "wholesaler": BETA_ALL,    
+    "distributor": BETA_ALL,   
+    "factory": BETA_ALL,       
 }
-# Piirame tellimuse muutust (RAMP): Mõõdukalt madal, et tagada stabiilsus, aga lubada Backlog'ist väljumist.
-MAX_ORDER_CHANGE = 0.15 
+# Piirame tellimuse muutust (RAMP): ÄÄRMUSELT MADAL, et vältida tellimuste kõikumist (Bullwhip'i likvideerimine).
+MAX_ORDER_CHANGE = 0.05 
 ROLES = ["retailer", "wholesaler", "distributor", "factory"]
 INITIAL_DEMAND_ESTIMATE = 10 # Eeldame esimesel nädalal algnõudlust 10
 
@@ -163,6 +166,7 @@ def decide_for_role(weeks: List[Dict[str, Any]], role: str) -> int:
     # Piirame tellimuste muutuse maksimaalselt MAX_ORDER_CHANGE protsendiga.
     
     # Maksimaalne lubatud muutus (minimaalselt 1)
+    # Arvestame RAMP'i alati vähemalt 1, et ei tekiks 0/0 muutust, kui fc on madal.
     ramp = max(1, round_half_up(MAX_ORDER_CHANGE * max(fc, 1.0)))
     
     # Min ja Max tellimuse piirid eelmise tellimuse suhtes
