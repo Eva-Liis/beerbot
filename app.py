@@ -1,214 +1,108 @@
-from __future__ import annotations
-from typing import Dict, Any, Tuple, List
 from flask import Flask, request, jsonify
 import math
 
-# --- Handshake meta ---
-STUDENT_EMAIL = "evtimm@taltech.ee"
-ALGO_NAME = "EvaSellsBeer"
-VERSION = "v1.0.2"
-SUPPORTS = {"blackbox": True, "glassbox": False}
-HANDSHAKE_MESSAGE = "BeerBot ready"
-
 app = Flask(__name__)
 
-# --- Optimeeritud parameetrid (Retailer Agressiivsus + Ülejäänud Dämping) ---
-ALPHA = 0.10           # Nõudluse silumine: Hoiame stabiilsena.
-K_SAFETY = 0.75        # Ohutusvaru kordaja: Tasakaalustatud väärtus, et vältida liigset Inventuuri.
+# === KONSTANDID ===
+K_SAFETY = 0.75
+BETA_RETAILER = 0.35
+BETA_OTHER = 0.10
+MAX_ORDER_CHANGE = 0.30
+ALPHA = 0.10
+SEED = 2025
 
-REVIEW_TIME = 1        # R: Iganädalane läbivaatus
-LEAD_TIME = 2          # L: Tarnetsükli viivitus (Standard)
-H_TARGET = REVIEW_TIME + LEAD_TIME # H: Kogu täitmisaeg (Target Period = 3 nädalat)
+# Deterministliku käitumise tagamiseks (ei kasuta random, aga võid hiljem lisada)
+import random
+random.seed(SEED)
 
-# Dämpimise koefitsient (beta): Retailer on agressiivsem, teised on dämpitud.
-BETA_RETAILER = 0.35  # JAEMÜÜJA on agressiivsem - reageerib kiiresti Backlog'ile.
-BETA_OTHER = 0.10     # TEISED lülid dämpivad Bullwhip'i.
+# === ABI FUNKTSIOONID ===
+def smooth_demand(prev_forecast, actual, alpha=ALPHA):
+    return round(alpha * actual + (1 - alpha) * prev_forecast)
 
-BETA_BY_ROLE = {
-    "retailer": BETA_RETAILER,      
-    "wholesaler": BETA_OTHER,    
-    "distributor": BETA_OTHER,   
-    "factory": BETA_OTHER,       
-}
-# Piirame tellimuse muutust (RAMP): Mõõdukas Ramp - lubab Retailer'il kiirendada, aga hoiab Bullwhip'i kontrolli all.
-MAX_ORDER_CHANGE = 0.30 
-ROLES = ["retailer", "wholesaler", "distributor", "factory"]
-INITIAL_DEMAND_ESTIMATE = 10 # Eeldame esimesel nädalal algnõudlust 10
+def calculate_order(role_data, prev_order, prev_forecast, beta, is_retailer=False):
+    incoming = role_data["incoming_orders"]
+    backlog = role_data["backlog"]
+    inventory = role_data["inventory"]
+    arriving = role_data["arriving_shipments"]
 
+    # Efektiivne nõudlus = sissetulev tellimus + backlog
+    effective_demand = incoming + backlog
 
-def round_half_up(x: float) -> int:
-    """Ümardab pool üles ja tagab, et tulemus pole negatiivne."""
-    return max(0, int(math.floor(x + 0.5)))
+    # Soovitud laoseis = prognoos + ohutusvaru
+    desired_inventory = prev_forecast * (1 + K_SAFETY)
 
-def smooth_forecast_and_mad(weeks: List[Dict[str, Any]], role: str, alpha: float) -> Tuple[float, float]:
-    """
-    Eksponentsiaalne silumine ja eksponentsiaalselt silutud absoluutne hälve (MAD).
-    Kasutab incoming_orders seeriat (nõudlust).
-    """
-    fc = None
-    mad = 0.0
-    
-    # Eeldame, et nõudlus on eelmise lüli tellimus, jaemüüjal on see kliendi nõudlus.
-    demand_key = "customer_orders" if role == "retailer" else "incoming_orders"
-    
-    # Esimestel nädalatel kasutame algset hinnangut, et vältida nulliga jagamist või ebastabiilsust
-    initial_demand = INITIAL_DEMAND_ESTIMATE
+    # Tellimus = prognoos + korrektsioon (laoseis + backlog)
+    base_order = prev_forecast + beta * (effective_demand - arriving - inventory + desired_inventory - inventory)
 
-    for i, w in enumerate(weeks):
-        # Võtame sissetuleva tellimuse (mis on tegelik nõudlus sellele lülile)
-        d = max(0, int(w["roles"][role].get(demand_key, 0)))
-        
-        if fc is None:
-            # Algne prognoos (FC)
-            # Eeldus: FC0 = esimene tegelik nõudlus, kui see on olemas, muidu algväärtus.
-            fc = float(d) if d > 0 else float(initial_demand)
-        else:
-            # Eelmise perioodi nõudluse leidmine MAD arvutamiseks
-            if i > 0:
-                # Kui i > 0, peaks weeks[i-1] sisaldama tegeliku nõudluse andmeid.
-                prev_w = weeks[i-1]
-                prev_d = float(prev_w["roles"][role].get(demand_key, initial_demand)) 
-            else:
-                # i=0 (esimene nädal), kasutame algväärtust
-                prev_d = float(initial_demand)
-            
-            # Prognoos (Exponential Smoothing)
-            fc = alpha * d + (1 - alpha) * fc
-            # MAD (Mean Absolute Deviation, silutud)
-            mad = alpha * abs(d - prev_d) + (1 - alpha) * mad
-            
-    # Tagasta prognoos ja stabiilne MAD väärtus (garanteeri vähemalt 1.0)
-    return (fc or float(initial_demand)), max(1.0, mad or fc / 5.0 or 1.0)
+    # Piirame muutust võrreldes eelmise tellimusega
+    max_change = prev_order * MAX_ORDER_CHANGE
+    order = max(prev_order - max_change, min(prev_order + max_change, base_order))
 
+    return max(0, round(order))
 
-def calculate_pipeline(weeks: List[Dict[str, Any]], role: str) -> int:
-    """
-    Arvutab laoseisus olevad tellimused (Pipeline Inventory) nende saadetiste alusel, 
-    mis on tellitud, aga pole veel saabunud.
-    """
-    # Eeldus: L=2. Teel on tellimused, mis anti nädalal t-1.
-    if LEAD_TIME <= 1 or len(weeks) < LEAD_TIME:
-         # Kui andmeid pole piisavalt, on pipeline 0.
-        return 0
-    
-    # Vastavalt juhendile on tellimus Q(t) tehtud nädalal t ja see saabub nädalal t+L.
-    # Nädalal N on teel tellimused, mis anti N-1, N-2, ... N-(L-1) nädalatel.
-    
-    # Orders massiivi pikkus on N (alates nädalast 1 kuni N)
-    orders = [int(w.get("orders", {}).get(role, 0)) for w in weeks]
-    
-    # Teel olevate tellimuste arv on L-1
-    take = LEAD_TIME - 1
-    
-    # Summeerime tellimused, mis on teel (nt L=2, siis teel on 2-1=1 tellimus: weeks[-1])
-    # Tuleb veenduda, et orders massiivis on piisavalt elemente, et tagasi vaadata take võrra.
-    if len(orders) < take:
-        return 0
-
-    # orders[-1] on eelmise nädala tellimus (Q(N-1)), orders[-2] on Q(N-2) jne.
-    # Alustame tagant ja summeerime 'take' arvu tellimusi.
-    pipeline_sum = sum(orders[-(i + 1)] for i in range(take))
-    
-    return pipeline_sum
-
-
-def decide_for_role(weeks: List[Dict[str, Any]], role: str) -> int:
-    """Põhiline Order-Up-To poliitika loogika (S-s poliitika)."""
-    
-    # Nädala 1 erikäsitlus: kui weeks on pikkusega 1 ja see on simulatsiooni algus
-    if len(weeks) == 1 and weeks[0].get("week") == 1:
-        # Hoidke esimene tellimus madalal, et vältida esialgset Bullwhip'i
-        return INITIAL_DEMAND_ESTIMATE
-
-    current_state = weeks[-1]["roles"][role]
-    
-    # 1) H: Kogu täitmisaeg (fikseeritud)
-    H = H_TARGET 
-
-    # 2) Prognoos (fc) ja Viga (mad)
-    fc, mad = smooth_forecast_and_mad(weeks, role, ALPHA)
-
-    # 3) Ohutusvaru (Safety Stock)
-    # SS = K * MAD * sqrt(H)
-    safety_stock = K_SAFETY * mad * math.sqrt(H)
-    
-    # 4) Inventuuri positsioon (Inventory Position, IP)
-    # IP = Inventory + Pipeline - Backlog
-    
-    inventory = int(current_state.get("inventory", 0))
-    backlog = int(current_state.get("backlog", 0))
-    # 'arriving_shipments' on juba Inventori poolt arvesse võetud (selle nädala saabumine)
-    # See väärtus on juba 'inventory' sees, seega ei lisa seda IP-le, vaid arvestame 
-    # ainult teel olevaid tellimusi, mis POLE veel saabunud (st Q(t-1), Q(t-2)).
-    pipeline = calculate_pipeline(weeks, role)
-    
-    IP = inventory - backlog + pipeline
-
-    # 5) Sihttase (Order-Up-To Level, S)
-    # S = H * FC + SS
-    target_S = fc * H + safety_stock
-
-    # 6) Puudujääk (GAP)
-    gap = target_S - IP
-    
-    # 7) Baas-tellimus Q* (silutud reaktsioon puudujäägile)
-    # Q* = BETA * GAP + (1 - BETA) * Previous_Order
-    
-    beta = BETA_BY_ROLE.get(role, 0.5)
-    
-    # Eelmise nädala tellimus (see on weeks[-1]["orders"])
-    q_last = max(0, int(weeks[-1].get("orders", {}).get(role, 0)))
-    
-    # Uus tellimus on tasakaalustatud: reaktsioon puudujäägile ja inerts eelmise tellimuse suhtes
-    q_base = beta * gap + (1 - beta) * q_last
-
-    # 8) Piirangud (Ramp Constraint)
-    # Piirame tellimuste muutuse maksimaalselt MAX_ORDER_CHANGE protsendiga.
-    
-    # Maksimaalne lubatud muutus (minimaalselt 1)
-    # Arvestame RAMP'i alati vähemalt 1, et ei tekiks 0/0 muutust, kui fc on madal.
-    ramp = max(1, round_half_up(MAX_ORDER_CHANGE * max(fc, 1.0)))
-    
-    # Min ja Max tellimuse piirid eelmise tellimuse suhtes
-    q_min_ramp = max(0, q_last - ramp)
-    q_max_ramp = q_last + ramp
-    
-    # Rakendame piirangud
-    q_final = min(q_max_ramp, max(q_min_ramp, round_half_up(q_base)))
-    
-    # Lõplik tellimus ei saa olla väiksem kui 0.
-    return max(0, int(q_final))
-
-
-@app.post("/api/decision")
+@app.route('/api/decision', methods=['POST'])
 def decision():
-    """Võtab vastu API päringu ja väljastab tellimused."""
-    body: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
+    data = request.get_json() or {}
 
-    # Handshake - Protokolli kinnitus
-    if body.get("handshake") is True:
+    # === HANDSHAKE ===
+    if data.get("handshake") is True:
         return jsonify({
             "ok": True,
-            "student_email": STUDENT_EMAIL,
-            "algorithm_name": ALGO_NAME,
-            "version": VERSION,
-            "supports": SUPPORTS,
-            "message": HANDSHAKE_MESSAGE,
-        }), 200
+            "student_email": "evtimm@taltech.ee",  # ← MUUDA SIIN!
+            "algorithm_name": "MeSellingBeerMuch",
+            "version": "v26.0.0",
+            "supports": {"blackbox": True, "glassbox": False},
+            "message": "BeerBot ready",
+        })
 
-    # Weekly Decision - Iganädalane otsus
-    weeks = body.get("weeks", [])
-    if not isinstance(weeks, list) or not weeks:
-        # Vaikimisi tellimus, kui andmed puuduvad
-        return jsonify({"orders": {r: INITIAL_DEMAND_ESTIMATE for r in ROLES}}), 200
+    # === WEEKLY STEP ===
+    weeks = data.get("weeks", [])
+    if not weeks:
+        return jsonify({"orders": {"retailer": 10, "wholesaler": 10, "distributor": 10, "factory": 10}})
 
-    try:
-        orders = {r: decide_for_role(weeks, r) for r in ROLES}
-        # Garanteeri, et tellimus on täisarv ja >= 0
-        orders = {k: max(0, int(v)) for k, v in orders.items()}
-        return jsonify({"orders": orders}), 200
-    except Exception as e:
-        # Vigade käsitlemine
-        print(f"Decision calculation failed: {e}")
-        # Vaikimisi tellimus veaolukorras
-        return jsonify({"orders": {r: INITIAL_DEMAND_ESTIMATE for r in ROLES}}), 200
+    current_week = weeks[-1]
+    week_num = current_week["week"]
+    mode = data.get("mode", "blackbox")
+
+    roles = current_week["roles"]
+    prev_orders = current_week["orders"]
+
+    # Algväärtused esimesel nädalal
+    if week_num == 1:
+        forecast = {role: roles[role]["incoming_orders"] for role in roles}
+        prev_order_dict = {role: 10 for role in roles}  # default
+    else:
+        # Taasta eelmine prognoos ja tellimus
+        prev_week = weeks[-2]
+        prev_orders = prev_week["orders"]
+        # Lihtne: kasuta eelmise nädala sissetulevat tellimust kui prognoosi alus
+        forecast = {}
+        for role in roles:
+            actual_demand = roles[role]["incoming_orders"]
+            prev_forecast = prev_orders[role] if week_num == 2 else forecast.get(role, actual_demand)
+            forecast[role] = smooth_demand(prev_forecast, actual_demand, ALPHA)
+        prev_order_dict = prev_orders
+
+    # Arvuta uued tellimused
+    orders = {}
+    for role in ["retailer", "wholesaler", "distributor", "factory"]:
+        role_data = roles[role]
+        prev_order = prev_order_dict.get(role, 10)
+        prev_forecast = forecast.get(role, role_data["incoming_orders"])
+
+        beta = BETA_RETAILER if role == "retailer" else BETA_OTHER
+        is_retailer = (role == "retailer")
+
+        # Blackbox režiim: kasuta ainult oma rolli andmeid
+        if mode == "blackbox" and role != "retailer":
+            # Simuleeri, et teised rollid näevad ainult oma andmeid
+            # (kuid meil on siiski kõik andmed, seega kasutame siiski oma rolli)
+            pass
+
+        order = calculate_order(role_data, prev_order, prev_forecast, beta, is_retailer)
+        orders[role] = order
+
+    return jsonify({"orders": orders})
+
+if __name__ == "__main__":
+    app.run(debug=False)
