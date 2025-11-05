@@ -12,17 +12,17 @@ HANDSHAKE_MESSAGE = "BeerBot ready"
 
 app = Flask(__name__)
 
-# --- Optimeeritud parameetrid (ÄÄRMUSLIK BULLWHIP'I KONTROLL) ---
+# --- Optimeeritud parameetrid (Retailer Agressiivsus + Ülejäänud Dämping) ---
 ALPHA = 0.10           # Nõudluse silumine: Hoiame stabiilsena.
-K_SAFETY = 0.50        # Ohutusvaru kordaja: VÄGA MADAL, et Inventuuri kulu oleks minimaalne.
+K_SAFETY = 0.75        # Ohutusvaru kordaja: Tasakaalustatud väärtus, et vältida liigset Inventuuri.
 
 REVIEW_TIME = 1        # R: Iganädalane läbivaatus
 LEAD_TIME = 2          # L: Tarnetsükli viivitus (Standard)
 H_TARGET = REVIEW_TIME + LEAD_TIME # H: Kogu täitmisaeg (Target Period = 3 nädalat)
 
-# Dämpimise koefitsient (beta): Väga madal, et saavutada stabiilsus (nagu edukaimates lahendustes).
-BETA_RETAILER = 0.10  # Jaemüüja on dämpitud.
-BETA_OTHER = 0.10     # Teised lülid on dämpitud.
+# Dämpimise koefitsient (beta): Retailer on agressiivsem, teised on dämpitud.
+BETA_RETAILER = 0.35  # JAEMÜÜJA on agressiivsem - reageerib kiiresti Backlog'ile.
+BETA_OTHER = 0.10     # TEISED lülid dämpivad Bullwhip'i.
 
 BETA_BY_ROLE = {
     "retailer": BETA_RETAILER,      
@@ -30,8 +30,8 @@ BETA_BY_ROLE = {
     "distributor": BETA_OTHER,   
     "factory": BETA_OTHER,       
 }
-# Piirame tellimuse muutust (RAMP): Mõõdukas Ramp, et vältida Bullwhip'i eskaleerumist.
-MAX_ORDER_CHANGE = 0.25 
+# Piirame tellimuse muutust (RAMP): Mõõdukas Ramp - lubab Retailer'il kiirendada, aga hoiab Bullwhip'i kontrolli all.
+MAX_ORDER_CHANGE = 0.30 
 ROLES = ["retailer", "wholesaler", "distributor", "factory"]
 INITIAL_DEMAND_ESTIMATE = 10 # Eeldame esimesel nädalal algnõudlust 10
 
